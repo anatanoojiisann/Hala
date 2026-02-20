@@ -23,6 +23,25 @@ export type TradeRow = {
   durationMins?: number
 }
 
+export type CopyGuardParams = {
+  maxLeverage: number
+  maxPositionPct: number
+  maxSlippageBps: number
+  pauseAfterLosses: number
+  pauseAtDrawdownPct: number
+}
+
+export type TemplateId = 'CONSERVATIVE' | 'BALANCED' | 'AGGRESSIVE'
+
+export type SmartCopyTemplate = {
+  id: TemplateId
+  name: string
+  note: string
+  copyGuard: CopyGuardParams
+  ratio: number
+  amountUsd: number
+}
+
 export const trader = {
   address: '0xff3f...316d',
   trackingSinceDays: 124,
@@ -41,15 +60,7 @@ export const metricsByWindow: Record<MetricsWindow, TraderMetrics> = {
     avgHoldHours: 7,
     longBiasPct: 50,
   },
-  '30D': {
-    roiPct: 8.88,
-    maxDrawdownPct: 12.1,
-    profitFactor: 1.34,
-    avgTradesPerDay: 3.1,
-    winRatePct: 68,
-    avgHoldHours: 11,
-    longBiasPct: 58,
-  },
+  '30D': {},
   ALL: {
     roiPct: 91.37,
     maxDrawdownPct: 23.5,
@@ -74,4 +85,37 @@ export const tradesByWindow: Record<MetricsWindow, TradeRow[]> = {
   ],
 }
 
+export const smartTemplates: SmartCopyTemplate[] = [
+  {
+    id: 'CONSERVATIVE',
+    name: '保守模式',
+    note: '低杠杆 + 严格回撤保护',
+    ratio: 0.6,
+    amountUsd: 80,
+    copyGuard: { maxLeverage: 2, maxPositionPct: 12, maxSlippageBps: 8, pauseAfterLosses: 2, pauseAtDrawdownPct: 6 },
+  },
+  {
+    id: 'BALANCED',
+    name: '均衡模式',
+    note: '默认推荐，收益/回撤平衡',
+    ratio: 1,
+    amountUsd: 120,
+    copyGuard: { maxLeverage: 3, maxPositionPct: 20, maxSlippageBps: 12, pauseAfterLosses: 3, pauseAtDrawdownPct: 10 },
+  },
+  {
+    id: 'AGGRESSIVE',
+    name: '冲锋模式',
+    note: '高频跟随，强制开启 CopyGuard',
+    ratio: 1.6,
+    amountUsd: 200,
+    copyGuard: { maxLeverage: 4, maxPositionPct: 28, maxSlippageBps: 18, pauseAfterLosses: 2, pauseAtDrawdownPct: 12 },
+  },
+]
+
 export const curve = [0, 0.2, 0.1, 0.38, 0.32, 0.61, 0.66, 0.82, 0.79, 0.81, 0.85, 0.8, 0.81, 0.81, 0.81]
+
+export const aiRules = [
+  '机会等级基于 ROI、PF、交易频率加权计算（demo 规则）',
+  '翻车风险基于 MDD、杠杆偏好、最近活跃度评估（demo 规则）',
+  '可复制性基于样本数、平均持仓时长与胜率（demo 规则）',
+]
