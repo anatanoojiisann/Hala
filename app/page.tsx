@@ -1,0 +1,467 @@
+'use client'
+
+import { FormEvent, useEffect, useMemo, useState } from 'react'
+import { aiRules, curve, metricsByWindow, MetricsWindow, smartTemplates, TemplateId, trader, tradesByWindow } from '@/lib/mock'
+
+type Tab = 'pnl' | 'positions' | 'deposits' | 'orders'
+type View = 'equity' | 'pnl'
+type AiTab = 'ai' | 'risk'
+type EventName = 'impression' | 'expand' | 'why_open' | 'template_click' | 'submit' | 'copy_started' | 'trade_filled'
+
+type CopyConfig = {
+  enabled: boolean
+  mode: 'FIXED_USD' | 'PROPORTIONAL'
+  amountUsd: number
+  ratio: number
+  maxLeverage: number
+  perTradeStopLossPct: number
+  maxDrawdownStopPct: number
+  allowedSymbols: string
+  maxPositionPct: number
+  maxSlippageBps: number
+  pauseAfterLosses: number
+  selectedTemplate?: TemplateId
+}
+
+type EventLog = { name: EventName; ts: number; detail: string }
+
+const WINDOW_OPTIONS: MetricsWindow[] = ['7D', '30D', 'ALL']
+
+const emptyCopy: CopyConfig = {
+  enabled: false,
+  mode: 'PROPORTIONAL',
+  amountUsd: 100,
+  ratio: 1,
+  maxLeverage: 1,
+  perTradeStopLossPct: 5,
+  maxDrawdownStopPct: 10,
+  allowedSymbols: 'BTC,ETH,SOL',
+  maxPositionPct: 20,
+  maxSlippageBps: 12,
+  pauseAfterLosses: 3,
+  selectedTemplate: 'BALANCED',
+}
+
+function wait(ms: number) {
+  return new Promise((r) => setTimeout(r, ms))
+}
+
+function Toast({ message }: { message: string }) {
+  return <div className="fixed right-4 top-4 z-50 rounded-md border border-line bg-black/80 px-4 py-2 text-sm">{message}</div>
+}
+
+export default function Page() {
+  const [window, setWindow] = useState<MetricsWindow>('ALL')
+  const [tab, setTab] = useState<Tab>('pnl')
+  const [view, setView] = useState<View>('equity')
+  const [loading, setLoading] = useState(true)
+  const [tableLoading, setTableLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [toast, setToast] = useState('')
+  const [isFollow, setIsFollow] = useState(false)
+  const [copyConfig, setCopyConfig] = useState<CopyConfig>(emptyCopy)
+  const [showCopy, setShowCopy] = useState(false)
+  const [showBacktest, setShowBacktest] = useState(false)
+  const [backtestLoading, setBacktestLoading] = useState(false)
+  const [backtestError, setBacktestError] = useState('')
+  const [backtestResult, setBacktestResult] = useState<null | { roi: number; mdd: number; pf: number; trades: number }>(null)
+  const [aiTab, setAiTab] = useState<AiTab>('ai')
+  const [aiLoading, setAiLoading] = useState(true)
+  const [aiError, setAiError] = useState('')
+  const [aiExpanded, setAiExpanded] = useState(false)
+  const [expandLoading, setExpandLoading] = useState(false)
+  const [whyOpen, setWhyOpen] = useState(false)
+  const [filledOnce, setFilledOnce] = useState(false)
+  const [events, setEvents] = useState<EventLog[]>([])
+
+  const metrics = metricsByWindow[window]
+  const trades = tradesByWindow[window]
+  const lowConfidence = !metrics.roiPct || !metrics.maxDrawdownPct || !metrics.profitFactor || trades.length < 2
+  const suspicious = trader.lastTradeDaysAgo > 30
+
+  function logEvent(name: EventName, detail: string) {
+    const next = [{ name, detail, ts: Date.now() }, ...events].slice(0, 12)
+    setEvents(next)
+    localStorage.setItem('events:0xff3f', JSON.stringify(next))
+  }
+
+  useEffect(() => {
+    const f = localStorage.getItem('follow:0xff3f')
+    const c = localStorage.getItem('copyConfig:0xff3f')
+    const e = localStorage.getItem('events:0xff3f')
+    setIsFollow(f === '1')
+    if (c) setCopyConfig(JSON.parse(c))
+    if (e) setEvents(JSON.parse(e))
+    ;(async () => {
+      await wait(500)
+      if (Math.random() < 0.08) setError('加载失败，请重试。')
+      setLoading(false)
+    })()
+    ;(async () => {
+      await wait(650)
+      if (Math.random() < 0.12) setAiError('AI 分析暂不可用')
+      else logEvent('impression', 'ai_card_shown')
+      setAiLoading(false)
+    })()
+  }, [])
+
+  useEffect(() => {
+    if (!toast) return
+    const t = setTimeout(() => setToast(''), 1800)
+    return () => clearTimeout(t)
+  }, [toast])
+
+  useEffect(() => {
+    if (!copyConfig.enabled || filledOnce) return
+    const t = setTimeout(() => {
+      setFilledOnce(true)
+      setToast('模拟成交成功：BTCUSDT 成交')
+      logEvent('trade_filled', 'auto_fill_btc')
+    }, 1400)
+    return () => clearTimeout(t)
+  }, [copyConfig.enabled, filledOnce])
+
+  const curvePath = useMemo(() => {
+    const values = view === 'equity' ? curve : curve.map((x) => x - 0.5)
+    return values.map((v, i) => `${i * 28},${190 - v * 140}`).join(' ')
+  }, [view])
+
+  const opportunityScore = Math.round((((metrics.roiPct ?? 0) * 0.8) + ((metrics.profitFactor ?? 0) * 20) + ((metrics.avgTradesPerDay ?? 0) * 12)))
+  const riskScore = Math.min(99, Math.max(1, Math.round(((metrics.maxDrawdownPct ?? 30) * 2.2) + trader.marginUtilization * 100 + trader.lastTradeDaysAgo)))
+  const copyScore = Math.max(5, Math.round((metrics.winRatePct ?? 30) * 0.8 + (trades.length * 3)))
+
+  async function onWindowChange(next: MetricsWindow) {
+    setWindow(next)
+    setTableLoading(true)
+    await wait(450)
+    setTableLoading(false)
+  }
+
+  async function onTabChange(next: Tab) {
+    setTab(next)
+    setTableLoading(true)
+    await wait(350)
+    setTableLoading(false)
+  }
+
+  async function onExpandAi() {
+    if (aiExpanded) {
+      setAiExpanded(false)
+      return
+    }
+    setExpandLoading(true)
+    await wait(420)
+    setExpandLoading(false)
+    setAiExpanded(true)
+    logEvent('expand', 'ai_expand_open')
+  }
+
+  function toggleFollow() {
+    const next = !isFollow
+    setIsFollow(next)
+    localStorage.setItem('follow:0xff3f', next ? '1' : '0')
+    setToast(next ? '已追踪交易员' : '已取消追踪')
+  }
+
+  function applyTemplate(id: TemplateId) {
+    const tpl = smartTemplates.find((item) => item.id === id)
+    if (!tpl) return
+    const next = {
+      ...copyConfig,
+      mode: 'PROPORTIONAL' as const,
+      selectedTemplate: tpl.id,
+      ratio: tpl.ratio,
+      amountUsd: tpl.amountUsd,
+      maxLeverage: tpl.copyGuard.maxLeverage,
+      maxDrawdownStopPct: tpl.copyGuard.pauseAtDrawdownPct,
+      maxPositionPct: tpl.copyGuard.maxPositionPct,
+      maxSlippageBps: tpl.copyGuard.maxSlippageBps,
+      pauseAfterLosses: tpl.copyGuard.pauseAfterLosses,
+    }
+    setCopyConfig(next)
+    setShowCopy(true)
+    setToast(`已套用 ${tpl.name} 模板`)
+    logEvent('template_click', tpl.id)
+  }
+
+  function saveCopy(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault()
+    if (copyConfig.maxLeverage <= 0 || copyConfig.amountUsd <= 0 || copyConfig.maxDrawdownStopPct <= 0) return
+    const next = { ...copyConfig, enabled: true }
+    setCopyConfig(next)
+    localStorage.setItem('copyConfig:0xff3f', JSON.stringify(next))
+    setShowCopy(false)
+    setToast('跟单已开启（模拟）')
+    logEvent('submit', `template:${next.selectedTemplate ?? 'CUSTOM'}`)
+    logEvent('copy_started', 'copy_enabled')
+  }
+
+  async function runBacktest(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault()
+    setBacktestError('')
+    if (copyConfig.maxLeverage <= 0 || copyConfig.amountUsd <= 0) {
+      setBacktestError('参数不合法：金额与杠杆必须大于 0')
+      return
+    }
+    setBacktestLoading(true)
+    await wait(750)
+    if (Math.random() < 0.1) {
+      setBacktestLoading(false)
+      setBacktestError('回测失败，请重试。')
+      return
+    }
+    setBacktestLoading(false)
+    setBacktestResult({ roi: 16.2, mdd: 9.1, pf: 1.41, trades: 27 })
+  }
+
+  function onRetryAi() {
+    setAiError('')
+    setAiLoading(true)
+    ;(async () => {
+      await wait(420)
+      setAiLoading(false)
+      logEvent('impression', 'ai_retry_success')
+    })()
+  }
+
+  const invalidCopy = copyConfig.maxLeverage <= 0 || (copyConfig.mode === 'FIXED_USD' && copyConfig.amountUsd <= 0) || (copyConfig.mode === 'PROPORTIONAL' && (copyConfig.ratio <= 0 || copyConfig.ratio > 5)) || copyConfig.maxDrawdownStopPct <= 0 || copyConfig.maxDrawdownStopPct > 100 || copyConfig.maxSlippageBps <= 0 || copyConfig.maxPositionPct <= 0 || copyConfig.maxPositionPct > 100
+
+  if (loading) {
+    return <div className="mx-auto max-w-7xl space-y-4 p-6">{[1, 2, 3].map((n) => <div key={n} className="h-40 animate-pulse rounded-xl bg-[#111827]" />)}</div>
+  }
+
+  return (
+    <main className="mx-auto min-h-screen max-w-7xl space-y-4 p-6 text-gray-100">
+      {toast && <Toast message={toast} />}
+      {error && (
+        <div className="card flex items-center justify-between p-4 text-red-300">
+          <span>{error}</span>
+          <button className="btn" onClick={() => setError('')}>重试</button>
+        </div>
+      )}
+
+      <section className="card grid grid-cols-1 gap-4 p-4 lg:grid-cols-[1fr_1fr_auto]">
+        <div>
+          <div className="text-sm text-emerald-400">☆ 交易员</div>
+          <div className="mt-1 flex items-center gap-2 text-2xl font-semibold">{trader.address}<button className="text-xs text-gray-400" onClick={() => navigator.clipboard.writeText('0xff3f81bf116...')}>复制</button></div>
+          <p className="mt-3 text-sm text-gray-400">时长 {Math.floor(trader.trackingSinceDays / 30)} months</p>
+          <p className="text-sm text-amber-300">最近交易 {trader.lastTradeDaysAgo} 天前：可能停更</p>
+        </div>
+        <div className="grid gap-2 text-sm">
+          <p>永续账户价值 <b>${trader.equity.toLocaleString()}</b></p>
+          <p>保证金使用率 <b>{(trader.marginUtilization * 100).toFixed(2)}%</b></p>
+          <div className="h-2 rounded bg-gray-800"><div className="h-2 rounded bg-gray-200" style={{ width: `${trader.marginUtilization * 100}%` }} /></div>
+          {copyConfig.enabled && <span className="inline-flex w-fit rounded bg-emerald-900 px-2 py-1 text-xs text-emerald-300">跟单中（模拟）</span>}
+        </div>
+        <div className="grid gap-2">
+          <button className="btn btn-primary" onClick={() => setShowCopy(true)}>{copyConfig.enabled ? '管理跟单' : '跟单交易员'}</button>
+          <button className="btn" onClick={toggleFollow}>{isFollow ? '取消追踪' : '追踪交易员'}</button>
+          <button className="btn" onClick={() => setShowBacktest(true)}>运行回测</button>
+        </div>
+      </section>
+
+      <section className="grid grid-cols-1 gap-4 lg:grid-cols-[2fr_1fr]">
+        <div className="card p-4">
+          <div className="mb-4 flex gap-2">{WINDOW_OPTIONS.map((w) => <button key={w} className={`btn ${window === w ? 'bg-gray-800' : ''}`} onClick={() => onWindowChange(w)}>{w}</button>)}</div>
+          <div className="grid grid-cols-2 gap-3 border-b border-line pb-4 text-sm md:grid-cols-4">
+            <Kpi label="ROI" v={metrics.roiPct} suffix="%" tip="收益率（demo 口径）" />
+            <Kpi label="MDD" v={metrics.maxDrawdownPct} suffix="%" tip="最大回撤（demo 口径）" />
+            <Kpi label="Profit Factor" v={metrics.profitFactor} tip="总盈利/总亏损绝对值" />
+            <Kpi label="交易频率" v={metrics.avgTradesPerDay} suffix="/d" tip="日均交易次数" />
+            <Kpi label="胜率" v={metrics.winRatePct} suffix="%" tip="盈利笔数/总笔数" />
+            <Kpi label="平均持仓时间" v={metrics.avgHoldHours} suffix="h" tip="平仓单平均持仓" />
+            <Kpi label="方向偏好" v={metrics.longBiasPct} suffix="% long" tip="做多成交占比" />
+          </div>
+          <div className="mt-4">
+            <div className="mb-3 flex items-center justify-between"><div className="text-sm text-gray-300">{view === 'equity' ? '永续余额曲线' : 'PnL曲线'}</div><div className="flex gap-2"><button className={`btn ${view === 'equity' ? 'bg-gray-800' : ''}`} onClick={() => setView('equity')}>Equity</button><button className={`btn ${view === 'pnl' ? 'bg-gray-800' : ''}`} onClick={() => setView('pnl')}>PnL</button></div></div>
+            <svg viewBox="0 0 420 200" className="h-52 w-full rounded-lg bg-[#070d14] p-2"><polyline fill="none" stroke="#29e0b1" strokeWidth="3" points={curvePath} /></svg>
+          </div>
+        </div>
+
+        <div className="card p-4 text-sm">
+          <div className="mb-3 flex gap-2">
+            <button className={`btn ${aiTab === 'ai' ? 'bg-gray-800' : ''}`} onClick={() => setAiTab('ai')}>AI 分析</button>
+            <button className={`btn ${aiTab === 'risk' ? 'bg-gray-800' : ''}`} onClick={() => setAiTab('risk')}>风险提示</button>
+          </div>
+
+          {aiTab === 'risk' && (
+            <ul className="space-y-2 text-gray-300">
+              <li>• 当前保证金使用率 {(trader.marginUtilization * 100).toFixed(2)}%</li>
+              <li>• 近 {window} 最大回撤 {metrics.maxDrawdownPct ?? '—'}%</li>
+              <li>• 建议最大跟单杠杆 ≤ 3x</li>
+            </ul>
+          )}
+
+          {aiTab === 'ai' && (
+            <>
+              {aiLoading ? <div className="space-y-2">{[1, 2, 3].map((x) => <div key={x} className="h-8 animate-pulse rounded bg-gray-900" />)}</div> : aiError ? (
+                <div className="rounded border border-rose-800 bg-rose-950/30 p-3">
+                  <p className="text-rose-300">{aiError}</p>
+                  <button className="btn mt-2" onClick={onRetryAi}>Retry</button>
+                  <p className="mt-2 text-xs text-gray-400">已降级：可切换到风险提示查看基础信息。</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <div className="rounded-lg border border-line bg-[#090f16] p-3">
+                    <p className="text-sm text-emerald-300">结论：机会{opportunityScore > 70 ? '较高' : '中等'}，但翻车风险 {riskScore > 65 ? '偏高' : '可控'}，建议先用均衡模板。</p>
+                    {lowConfidence && <p className="mt-2 text-xs text-amber-300">Low confidence：样本不足，建议优先观察 7D。</p>}
+                    {suspicious && <p className="mt-2 text-xs text-rose-300">异常地址风险：模板按钮已禁用。</p>}
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    <Score label="暴富指数" value={opportunityScore} />
+                    <Score label="翻车概率" value={riskScore} />
+                    <Score label="可复制性" value={copyScore} />
+                  </div>
+                  <div className="grid gap-2">
+                    {smartTemplates.map((t) => (
+                      <button
+                        key={t.id}
+                        className="btn flex items-center justify-between text-left"
+                        disabled={lowConfidence || suspicious}
+                        title={lowConfidence ? '低置信度：请先观察 7D' : suspicious ? '异常地址：禁止模板跟单' : ''}
+                        onClick={() => applyTemplate(t.id)}
+                      >
+                        <span>{t.name}</span>
+                        <span className="text-xs text-gray-400">{t.note}</span>
+                      </button>
+                    ))}
+                  </div>
+                  <button className="btn w-full" onClick={onExpandAi}>{aiExpanded ? '收起分析' : '展开 Why + 信号'}</button>
+
+                  {expandLoading && <div className="h-20 animate-pulse rounded bg-gray-900" />}
+                  {aiExpanded && !expandLoading && (
+                    <div className="space-y-2 rounded border border-line p-3">
+                      <p className="font-medium">AI 洞察</p>
+                      <p className="text-gray-300">过去 7D 的 PF 与胜率支撑“可复制性”，但 ALL 维度 MDD 较高，需要 CopyGuard 保护。</p>
+                      <p className="text-gray-300">CopyGuard 推荐：最大仓位 20%，连续亏损 3 次自动暂停。</p>
+                      <p className="text-gray-300">{lowConfidence ? '暂无明显预警信号' : '预警：最近交易间隔偏长，需关注活跃度回落。'}</p>
+                      <button className="btn w-full" onClick={() => {
+                        setWhyOpen((v) => !v)
+                        logEvent('why_open', 'toggle_why')
+                      }}>{whyOpen ? '收起 Why' : '查看 Why 证据'}</button>
+                      {whyOpen && <ul className="space-y-1 text-xs text-gray-400">{aiRules.map((r) => <li key={r}>• {r}</li>)}</ul>}
+                    </div>
+                  )}
+                  {copyConfig.enabled && <button className="btn w-full" onClick={() => {
+                    setFilledOnce(true)
+                    setToast('模拟成交成功：ETHUSDT 成交')
+                    logEvent('trade_filled', 'manual_fill_eth')
+                  }}>模拟成交</button>}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </section>
+
+      <section className="card p-4">
+        <div className="mb-3 flex flex-wrap gap-2">{[
+          ['pnl', '近期盈亏'],
+          ['positions', '未平仓位'],
+          ['deposits', '存取记录'],
+          ['orders', '未成交订单'],
+        ].map(([k, name]) => <button key={k} className={`btn ${tab === k ? 'bg-gray-800' : ''}`} onClick={() => onTabChange(k as Tab)}>{name}</button>)}</div>
+
+        {tableLoading ? <div className="h-24 animate-pulse rounded bg-gray-900" /> : (
+          <>
+            {tab === 'pnl' && (
+              trades.length === 0 ? <Empty text="该时间范围无交易，试试切换到 ALL" /> : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-sm">
+                    <thead className="text-gray-400"><tr><th>开仓日期</th><th>代码</th><th>方向</th><th>总盈亏</th><th>持仓时间</th></tr></thead>
+                    <tbody>{trades.map((t, i) => <tr key={i} className="border-t border-line"><td className="py-2">{t.openedAt}</td><td>{t.symbol}</td><td>{t.side} {t.leverage ? `${t.leverage}x` : ''}</td><td className={t.pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}>{t.pnl.toFixed(2)}</td><td>{t.durationMins ? `${Math.floor(t.durationMins / 60)}h` : '-'}</td></tr>)}</tbody>
+                  </table>
+                </div>
+              )
+            )}
+            {tab === 'positions' && <Empty text="无未平仓位，查看近期盈亏" />}
+            {tab === 'deposits' && <Empty text="暂无存取记录" />}
+            {tab === 'orders' && <Empty text="暂无未成交订单" />}
+          </>
+        )}
+      </section>
+
+      <section className="card p-4 text-xs">
+        <div className="mb-2 flex items-center justify-between">
+          <h4 className="font-medium">Event Debug Panel</h4>
+          <button className="btn py-1" onClick={() => {
+            setEvents([])
+            localStorage.removeItem('events:0xff3f')
+          }}>清空</button>
+        </div>
+        <div className="max-h-44 overflow-y-auto space-y-1 text-gray-300">
+          {events.length === 0 ? <p>暂无事件</p> : events.map((e, idx) => <p key={`${e.ts}-${idx}`}>{new Date(e.ts).toLocaleTimeString()} · {e.name} · {e.detail}</p>)}
+        </div>
+      </section>
+
+      {showCopy && (
+        <div className="fixed inset-0 z-40 grid place-items-center bg-black/70 p-4">
+          <form onSubmit={saveCopy} className="card w-full max-w-lg space-y-3 p-4">
+            <h3 className="text-lg font-semibold">跟单设置 {copyConfig.selectedTemplate ? `· ${copyConfig.selectedTemplate}` : ''}</h3>
+            <div>
+              <label className="text-sm">模式</label>
+              <select className="input" value={copyConfig.mode} onChange={(e) => setCopyConfig((s) => ({ ...s, mode: e.target.value as CopyConfig['mode'] }))}>
+                <option value="PROPORTIONAL">比例跟随</option>
+                <option value="FIXED_USD">固定金额</option>
+              </select>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <Input label="跟随比例" type="number" value={copyConfig.ratio} onChange={(v) => setCopyConfig((s) => ({ ...s, ratio: Number(v) }))} />
+              <Input label="固定金额 USD" type="number" value={copyConfig.amountUsd} onChange={(v) => setCopyConfig((s) => ({ ...s, amountUsd: Number(v) }))} />
+              <Input label="最大杠杆" type="number" value={copyConfig.maxLeverage} onChange={(v) => setCopyConfig((s) => ({ ...s, maxLeverage: Number(v) }))} />
+              <Input label="单笔止损 %" type="number" value={copyConfig.perTradeStopLossPct} onChange={(v) => setCopyConfig((s) => ({ ...s, perTradeStopLossPct: Number(v) }))} />
+              <Input label="最大回撤止损 %" type="number" value={copyConfig.maxDrawdownStopPct} onChange={(v) => setCopyConfig((s) => ({ ...s, maxDrawdownStopPct: Number(v) }))} />
+              <Input label="允许品种" value={copyConfig.allowedSymbols} onChange={(v) => setCopyConfig((s) => ({ ...s, allowedSymbols: v }))} />
+            </div>
+            <div className="rounded border border-line p-2 text-xs">
+              <p className="font-medium text-gray-200">CopyGuard 建议参数</p>
+              <p className="text-gray-400">最大仓位 {copyConfig.maxPositionPct}% · 最大滑点 {copyConfig.maxSlippageBps} bps · 连亏 {copyConfig.pauseAfterLosses} 次暂停</p>
+            </div>
+            <p className="rounded border border-amber-700 bg-amber-950/30 p-2 text-xs text-amber-300">风险提示：跟单可能导致本金亏损，请合理设置杠杆与止损。</p>
+            {invalidCopy && <p className="text-sm text-rose-400">参数不合法，请检查金额、比例、杠杆和 CopyGuard 阈值。</p>}
+            <div className="flex justify-end gap-2"><button className="btn" type="button" onClick={() => setShowCopy(false)}>取消</button><button className="btn btn-primary" disabled={invalidCopy}>确认跟单</button></div>
+          </form>
+        </div>
+      )}
+
+      {showBacktest && (
+        <div className="fixed inset-0 z-40 grid place-items-center bg-black/70 p-4">
+          <form onSubmit={runBacktest} className="card w-full max-w-xl space-y-3 p-4">
+            <h3 className="text-lg font-semibold">运行回测</h3>
+            <div className="grid grid-cols-3 gap-2 text-sm"><div>时间范围 {window}</div><div>手续费 6 bps</div><div>滑点 3 bps</div></div>
+            <button className="btn btn-primary">{backtestLoading ? '回测中...' : '运行回测'}</button>
+            {backtestError && <p className="text-sm text-rose-400">{backtestError}</p>}
+            {backtestResult && (
+              <div className="space-y-2 rounded border border-line p-3 text-sm">
+                <div className="grid grid-cols-4 gap-2"><Metric label="ROI" value={`${backtestResult.roi}%`} /><Metric label="MDD" value={`${backtestResult.mdd}%`} /><Metric label="PF" value={backtestResult.pf.toString()} /><Metric label="Trades" value={backtestResult.trades.toString()} /></div>
+                <svg viewBox="0 0 360 120" className="h-24 w-full rounded bg-[#070d14] p-2"><polyline fill="none" stroke="#29e0b1" strokeWidth="3" points="0,100 40,90 80,75 120,80 160,55 200,45 240,52 280,34 320,29 360,22" /></svg>
+                <p className="text-gray-400">交易摘要：本期共 27 笔，胜率 63%，主盈利来自 BTC 趋势段。</p>
+              </div>
+            )}
+            <div className="flex justify-end"><button type="button" className="btn" onClick={() => setShowBacktest(false)}>关闭</button></div>
+          </form>
+        </div>
+      )}
+    </main>
+  )
+}
+
+function Input({ label, value, onChange, type = 'text' }: { label: string; value: number | string; onChange: (x: string) => void; type?: string }) {
+  return <label className="text-sm">{label}<input className="input mt-1" type={type} value={value} onChange={(e) => onChange(e.target.value)} /></label>
+}
+
+function Kpi({ label, v, suffix = '', tip }: { label: string; v?: number; suffix?: string; tip: string }) {
+  return <div className="rounded-lg border border-line p-2"><p className="text-gray-400">{label} <span title={tip}>ⓘ</span></p><p className="mt-1 text-lg font-semibold">{v === undefined ? '—' : `${v}${suffix}`}</p></div>
+}
+
+function Empty({ text }: { text: string }) {
+  return <div className="rounded-md border border-dashed border-line p-8 text-center text-sm text-gray-400">{text}</div>
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return <div className="rounded border border-line p-2"><p className="text-gray-400">{label}</p><p className="font-semibold">{value}</p></div>
+}
+
+function Score({ label, value }: { label: string; value: number }) {
+  return <div className="rounded border border-line p-2"><p className="text-xs text-gray-400">{label}</p><p className="text-lg font-semibold">{value}</p></div>
+}

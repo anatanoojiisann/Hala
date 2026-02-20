@@ -1,0 +1,28 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  background: #05080f;
+  color: #e5e7eb;
+}
+
+.card {
+  @apply rounded-xl border border-line bg-panel;
+}
+
+.btn {
+  @apply rounded-md border border-line px-3 py-2 text-sm transition hover:border-gray-500 disabled:cursor-not-allowed disabled:opacity-40;
+}
+
+.btn-primary {
+  @apply bg-accent text-white hover:bg-violet-500;
+}
+
+.input {
+  @apply w-full rounded-md border border-line bg-[#0a111a] px-3 py-2 text-sm;
+}
